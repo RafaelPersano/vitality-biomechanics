@@ -472,7 +472,8 @@ export default function AdminPanel({ currentUserEmail, onAnnounceCreated, active
       let projectFiles = (window as any).GITHUB_PROJECT_FILES;
       if (!projectFiles) {
         setGithubLog(prev => [...prev, "Carregando a estrutura de arquivos da plataforma..."]);
-        const module = await import('../githubFiles');
+        const moduleName = 'githubFiles';
+        const module = await import(/* @vite-ignore */ `../${moduleName}`);
         projectFiles = module.GITHUB_PROJECT_FILES;
         (window as any).GITHUB_PROJECT_FILES = projectFiles;
       }
