@@ -4,7 +4,8 @@ import App from './App.tsx';
 import './index.css';
 
 // Pre-load the github project files metadata in the background
-import('./githubFiles').then((module) => {
+const fileName = 'githubFiles';
+import(/* @vite-ignore */ `./${fileName}`).then((module) => {
   (window as any).GITHUB_PROJECT_FILES = module.GITHUB_PROJECT_FILES;
 }).catch((err) => {
   console.warn("Could not pre-fetch github project files structure:", err);
