@@ -6,7 +6,7 @@ import { Exercise, PositionImage } from '../types';
 import { 
   Users, Award, Bell, Shield, Plus, Trash2, Edit, Save, ArrowLeft,
   Dumbbell, CheckCircle, RefreshCw, Eye, Check, Edit2, Upload, 
-  Camera, Video, Info, Calendar, AlignLeft, AlertCircle
+  Camera, Video, Info, Calendar, AlignLeft, AlertCircle, Github
 } from 'lucide-react';
 
 interface AdminPanelProps {
@@ -342,7 +342,7 @@ export default function AdminPanel({ currentUserEmail, onAnnounceCreated, active
   const [activeDrawIndex, setActiveDrawIndex] = useState<number | null>(null); // -1 for main, 0+ for positionImages, -2 for recording feedback
 
   // --- 🧭 NEW CORE ADMIN SUB-TABS STATE ---
-  const [adminSubTab, setAdminSubTab] = useState<'users' | 'challenges' | 'create_exercise' | 'sequences' | 'recordings' | 'notifications'>('users');
+  const [adminSubTab, setAdminSubTab] = useState<'users' | 'challenges' | 'create_exercise' | 'sequences' | 'recordings' | 'notifications' | 'github'>('users');
 
   useEffect(() => {
     if (activeRole === 'personal' && (adminSubTab === 'create_exercise' || adminSubTab === 'challenges')) {
@@ -389,6 +389,169 @@ export default function AdminPanel({ currentUserEmail, onAnnounceCreated, active
   const [notifHeaderTitle, setNotifHeaderTitle] = useState('');
   const [notifBodyMsg, setNotifBodyMsg] = useState('');
   const [notifSelectedStudent, setNotifSelectedStudent] = useState('all'); // 'all' or specific student email
+
+  // --- 💻 GITHUB INTEGRATION STATE ---
+  const [githubPat, setGithubPat] = useState(() => localStorage.getItem('vit_github_pat') || '');
+  const [githubRepoName, setGithubRepoName] = useState(() => localStorage.getItem('vit_github_repo') || '');
+  const [githubBranch, setGithubBranch] = useState(() => localStorage.getItem('vit_github_branch') || 'main');
+  const [githubIsPublic, setGithubIsPublic] = useState(false);
+  const [githubSyncStatus, setGithubSyncStatus] = useState<'idle' | 'running' | 'success' | 'error'>('idle');
+  const [githubProgress, setGithubProgress] = useState(0);
+  const [githubLog, setGithubLog] = useState<string[]>([]);
+  const [githubRepoUrl, setGithubRepoUrl] = useState('');
+
+  const handlePushToGithub = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!githubPat.trim() || !githubRepoName.trim()) {
+      alert("Por favor, preencha o Token de Acesso (PAT) e o nome do repositório.");
+      return;
+    }
+
+    // Salvar configurações localmente para conveniência
+    localStorage.setItem('vit_github_pat', githubPat.trim());
+    localStorage.setItem('vit_github_repo', githubRepoName.trim());
+    localStorage.setItem('vit_github_branch', githubBranch.trim());
+
+    setGithubSyncStatus('running');
+    setGithubProgress(0);
+    setGithubLog(["Iniciando sincronização com o GitHub..."]);
+
+    const token = githubPat.trim();
+    const fullRepo = githubRepoName.trim().replace(/^https:\/\/github\.com\//, '');
+    const [owner, repo] = fullRepo.split('/');
+
+    if (!owner || !repo) {
+      setGithubSyncStatus('error');
+      setGithubLog(prev => [...prev, "❌ Erro: Formato de repositório inválido. Use 'usuario/nome-do-repositorio'"]);
+      return;
+    }
+
+    try {
+      // 1. Verificar se o repositório existe, senão tentar criar!
+      setGithubLog(prev => [...prev, `Buscando repositório '${owner}/${repo}'...`]);
+      
+      const repoCheckRes = await fetch(`https://api.github.com/repos/${owner}/${repo}`, {
+        headers: {
+          'Authorization': `token ${token}`,
+          'Accept': 'application/vnd.github.v3+json'
+        }
+      });
+
+      if (repoCheckRes.status === 404) {
+        setGithubLog(prev => [...prev, `⚠️ Repositório não encontrado. Tentando criar repositório '${repo}' público=${githubIsPublic}...`]);
+        
+        // Tenta criar o repositório
+        const createRes = await fetch(`https://api.github.com/user/repos`, {
+          method: 'POST',
+          headers: {
+            'Authorization': `token ${token}`,
+            'Accept': 'application/vnd.github.v3+json',
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({
+            name: repo,
+            description: "Plataforma Biomecânica de Exercícios e Treino - Vitality",
+            private: !githubIsPublic,
+            auto_init: false
+          })
+        });
+
+        if (!createRes.ok) {
+          const createErrText = await createRes.text();
+          throw new Error(`Falha ao criar repositório: ${createRes.status} - ${createErrText}`);
+        }
+        setGithubLog(prev => [...prev, `✅ Repositório '${owner}/${repo}' criado com sucesso!`]);
+      } else if (!repoCheckRes.ok) {
+        const checkErrText = await repoCheckRes.text();
+        throw new Error(`Falha ao verificar repositório: ${repoCheckRes.status} - ${checkErrText}`);
+      } else {
+        setGithubLog(prev => [...prev, `✅ Repositório existente encontrado!`]);
+      }
+
+      // Obter os arquivos de forma segura
+      let projectFiles = (window as any).GITHUB_PROJECT_FILES;
+      if (!projectFiles) {
+        setGithubLog(prev => [...prev, "Carregando a estrutura de arquivos da plataforma..."]);
+        const module = await import('../githubFiles');
+        projectFiles = module.GITHUB_PROJECT_FILES;
+        (window as any).GITHUB_PROJECT_FILES = projectFiles;
+      }
+
+      if (!projectFiles || projectFiles.length === 0) {
+        throw new Error("Não foi possível carregar a estrutura de arquivos do projeto.");
+      }
+
+      const totalFiles = projectFiles.length;
+      let uploadedCount = 0;
+
+      for (const file of projectFiles) {
+        const path = file.path;
+        setGithubLog(prev => [...prev, `Sincronizando: ${path}...`]);
+
+        // Passo A: Pegar SHA do arquivo se já existir
+        let existingSha: string | undefined = undefined;
+        try {
+          const fileCheckRes = await fetch(`https://api.github.com/repos/${owner}/${repo}/contents/${path}?ref=${githubBranch}`, {
+            headers: {
+              'Authorization': `token ${token}`,
+              'Accept': 'application/vnd.github.v3+json'
+            }
+          });
+          if (fileCheckRes.ok) {
+            const data = await fileCheckRes.json();
+            existingSha = data.sha;
+          }
+        } catch (_) {}
+
+        // Passo B: Fazer upload/update do arquivo
+        // Safe base64 encoding to prevent encoding distortion in Node/browsers
+        const base64Content = btoa(unescape(encodeURIComponent(file.content)));
+        const bodyObj: any = {
+          message: `chore: sync ${path} from administrator dashboard`,
+          content: base64Content,
+          branch: githubBranch
+        };
+        if (existingSha) {
+          bodyObj.sha = existingSha;
+        }
+
+        const uploadRes = await fetch(`https://api.github.com/repos/${owner}/${repo}/contents/${path}`, {
+          method: 'PUT',
+          headers: {
+            'Authorization': `token ${token}`,
+            'Accept': 'application/vnd.github.v3+json',
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify(bodyObj)
+        });
+
+        if (!uploadRes.ok) {
+          const uploadErr = await uploadRes.text();
+          if (path.includes('.github/workflows/')) {
+            setGithubLog(prev => [...prev, `⚠️ Aviso: Não foi possível sincronizar ${path} (erro: ${uploadRes.status}).`]);
+            setGithubLog(prev => [...prev, `👉 Isso acontece porque seu Token do GitHub (PAT) não tem o escopo 'workflow' ativado.`]);
+            setGithubLog(prev => [...prev, `ℹ️ Se você deseja habilitar o Deploy automático para o GitHub Pages, vá em configurações do seu token no GitHub e marque a caixinha 'workflow'.`]);
+            setGithubLog(prev => [...prev, `⏩ Continuando a sincronização dos demais arquivos do sistema de qualquer forma...`]);
+          } else {
+            throw new Error(`Erro ao subir ${path}: ${uploadRes.status} - ${uploadErr}`);
+          }
+        }
+
+        uploadedCount++;
+        const percent = Math.round((uploadedCount / totalFiles) * 100);
+        setGithubProgress(percent);
+        setGithubLog(prev => [...prev, `✔ Sincronizado: ${path}`]);
+      }
+
+      setGithubRepoUrl(`https://github.com/${owner}/${repo}`);
+      setGithubSyncStatus('success');
+      setGithubLog(prev => [...prev, "🎉 SUCESSO! Repositório completamente sincronizado no GitHub! Link disponível."]);
+    } catch (err: any) {
+      console.error(err);
+      setGithubSyncStatus('error');
+      setGithubLog(prev => [...prev, `❌ Erro na Sincronização: ${err.message || err}`]);
+    }
+  };
 
   // --- 🎥 RECORDINGS STATE (PHYSICAL FORM REVIEW) ---
   const [recordingsList, setRecordingsList] = useState<any[]>([]);
@@ -1484,6 +1647,18 @@ export default function AdminPanel({ currentUserEmail, onAnnounceCreated, active
               <Bell className="w-4 h-4" />
               <span>Notificações ({notificationsList.length})</span>
             </button>
+
+            <button
+              onClick={() => setAdminSubTab('github')}
+              className={`px-4.5 py-2.5 rounded-lg font-mono text-[11px] uppercase font-bold tracking-wider transition whitespace-nowrap cursor-pointer flex items-center gap-1.5 ${
+                adminSubTab === 'github'
+                  ? 'bg-[#ff6b00] text-black font-extrabold shadow-md'
+                  : 'text-[#e2bfb0]/80 hover:text-white hover:bg-[#131313]/55 bg-transparent'
+              }`}
+            >
+              <Github className="w-4 h-4" />
+              <span>Sincronizar GitHub</span>
+            </button>
           </div>
 
           {/* 👥 VIEW: SELECT STUDENT & INDIVIDUALIZE EXERCISE */}
@@ -2436,6 +2611,202 @@ export default function AdminPanel({ currentUserEmail, onAnnounceCreated, active
                     {publishingNotification ? 'Publicando...' : 'Enviar Alerta Push'}
                   </button>
                 </form>
+              </div>
+            </div>
+          )}
+
+          {/* 💻 VIEW: GITHUB INTERACTION AUTO-PUBLISHER */}
+          {adminSubTab === 'github' && (
+            <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+              {/* Form Config (Left Column) */}
+              <div className="lg:col-span-1.5 bg-[#201f1f] p-5 rounded-xl border border-[#5a4136]/20 space-y-4 flex flex-col justify-between">
+                <div className="space-y-4">
+                  <div className="flex items-center gap-2 border-b border-[#5a4136]/15 pb-3">
+                    <Github className="w-5 h-5 text-[#ff6b00]" />
+                    <h4 className="text-xs font-bold uppercase tracking-wider text-[#ffb693] font-mono">
+                      Configuração de Integração de Código
+                    </h4>
+                  </div>
+
+                  <p className="text-xs text-[#e2bfb0]/80 leading-relaxed font-sans">
+                    Como Administrador, você pode sincronizar e publicar todo o código-fonte desta plataforma diretamente no seu GitHub. O app empacotará os scripts, componentes biomecânicos e estilos em tempo de execução e fará o upload usando a API REST do GitHub.
+                  </p>
+
+                  <form onSubmit={handlePushToGithub} className="space-y-4 pt-1">
+                    <div>
+                      <label className="block text-[10px] uppercase text-[#e2bfb0]/70 mb-1 font-mono font-semibold flex items-center justify-between">
+                        <span>GitHub Personal Access Token (PAT)</span>
+                        <a 
+                          href="https://github.com/settings/tokens/new?scopes=repo" 
+                          target="_blank" 
+                          rel="noreferrer"
+                          className="text-[#ff6b00] hover:underline text-[9px] uppercase font-bold"
+                        >
+                          Criar Token ↗
+                        </a>
+                      </label>
+                      <input
+                        type="password"
+                        placeholder="ghp_xxxxxxxxxxxxxxxxxxxx"
+                        value={githubPat}
+                        onChange={e => setGithubPat(e.target.value)}
+                        className="w-full bg-[#131313] border border-[#5a4136]/60 text-white rounded px-3 py-2 text-xs focus:ring-1 focus:ring-[#ff6b00] outline-none font-mono"
+                        required
+                      />
+                      <span className="text-[9px] text-[#e2bfb0]/40 block mt-1 font-mono leading-tight">
+                        Este token é usado localmente no seu navegador para autenticar com as APIs seguras do GitHub. Ele nunca é transmitido a nenhum outro servidor. Certifique-se de conceder escopo de <strong>'repo'</strong>.
+                      </span>
+                    </div>
+
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                      <div>
+                        <label className="block text-[10px] uppercase text-[#e2bfb0]/70 mb-1 font-mono font-semibold">
+                          Nome do Repositório
+                        </label>
+                        <input
+                          type="text"
+                          placeholder="usuario/nome-do-repositorio"
+                          value={githubRepoName}
+                          onChange={e => setGithubRepoName(e.target.value)}
+                          className="w-full bg-[#131313] border border-[#5a4136]/60 text-white rounded px-3 py-2 text-xs focus:ring-1 focus:ring-[#ff6b00] outline-none font-mono"
+                          required
+                        />
+                        <span className="text-[9px] text-[#e2bfb0]/40 block mt-1 font-mono">
+                          Ex: <code>rafaelpersano/vitality-biomechanics</code>
+                        </span>
+                      </div>
+
+                      <div>
+                        <label className="block text-[10px] uppercase text-[#e2bfb0]/70 mb-1 font-mono font-semibold">
+                          Branch de Sincronização
+                        </label>
+                        <input
+                          type="text"
+                          placeholder="main"
+                          value={githubBranch}
+                          onChange={e => setGithubBranch(e.target.value)}
+                          className="w-full bg-[#131313] border border-[#5a4136]/60 text-white rounded px-3 py-2 text-xs focus:ring-1 focus:ring-[#ff6b00] outline-none font-mono"
+                          required
+                        />
+                        <span className="text-[9px] text-[#e2bfb0]/40 block mt-1 font-mono">
+                          Padrão recomendado: <code>main</code>
+                        </span>
+                      </div>
+                    </div>
+
+                    <div className="flex items-center gap-2 bg-[#131313]/60 p-3 rounded-lg border border-[#5a4136]/15 hover:border-[#ff6b00]/10 transition-colors">
+                      <input
+                        type="checkbox"
+                        id="github_pub_check"
+                        checked={githubIsPublic}
+                        onChange={e => setGithubIsPublic(e.target.checked)}
+                        className="w-4 h-4 rounded border-[#5a4136] text-[#ff6b00] focus:ring-0 bg-[#201f1f] cursor-pointer"
+                      />
+                      <label htmlFor="github_pub_check" className="text-xs text-[#e2bfb0]/85 select-none cursor-pointer font-sans leading-tight">
+                        Criar como <strong>Repositório Público</strong> se não existir no GitHub.
+                        <span className="block text-[9 px] text-[#e2bfb0]/40 font-mono mt-0.5">Se desativado, o repositório gerado será Privado.</span>
+                      </label>
+                    </div>
+
+                    <div className="pt-2">
+                      <button
+                        type="submit"
+                        disabled={githubSyncStatus === 'running'}
+                        className="w-full bg-[#ff6b00] hover:bg-orange-500 font-extrabold text-xs py-3 rounded-lg text-black transition cursor-pointer flex justify-center items-center gap-1.5 shadow-lg uppercase font-mono tracking-wider border-0"
+                      >
+                        <Github className="w-4.5 h-4.5" />
+                        {githubSyncStatus === 'running' ? 'Subindo Código para o GitHub...' : 'Sincronizar e Subir para o GitHub'}
+                      </button>
+                    </div>
+                  </form>
+                </div>
+              </div>
+
+              {/* Progress Terminal Info (Right Column) */}
+              <div className="lg:col-span-1 border border-[#5a4136]/30 bg-[#131313] rounded-xl p-5 flex flex-col justify-between space-y-4">
+                <div className="space-y-4 flex-1 flex flex-col justify-between">
+                  <div className="space-y-1">
+                    <h5 className="text-[10px] uppercase font-mono font-bold tracking-widest text-[#ffb693]">
+                      Monitor de Progresso (REST API Console)
+                    </h5>
+                    
+                    {/* Progress Indicator */}
+                    <div className="pt-3 space-y-1.5">
+                      <div className="flex justify-between items-center text-[10px] font-mono">
+                        <span className="text-[#e2bfb0]/60">Sincronização global de arquivos:</span>
+                        <span className="text-[#ff6b00] font-bold">{githubProgress}%</span>
+                      </div>
+                      <div className="w-full bg-neutral-900 border border-[#5a4136]/20 h-2.5 rounded-full overflow-hidden">
+                        <div 
+                          className="bg-gradient-to-r from-orange-600 via-[#ff6b00] to-orange-400 h-full transition-all duration-300"
+                          style={{ width: `${githubProgress}%` }}
+                        ></div>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Terminal Log */}
+                  <div className="flex-1 bg-black/85 border border-[#5a4136]/15 rounded-lg p-3 pt-2 font-mono text-[9px] text-green-400/90 leading-normal space-y-1 overflow-y-auto max-h-[220px] min-h-[160px] scrollbar-thin select-text">
+                    <div className="text-gray-500 border-b border-[#5a4136]/10 pb-1 mb-1.5 flex items-center justify-between text-[8px]">
+                      <span>⚙ CONSOLE OUTPUT LOG</span>
+                      <span className="animate-pulse text-[#ff6b00]">● ONLINE</span>
+                    </div>
+                    {githubLog.map((log, idx) => (
+                      <div key={idx} className="whitespace-pre-wrap leading-relaxed truncate">
+                        {log}
+                      </div>
+                    ))}
+                    {githubSyncStatus === 'running' && (
+                      <div className="text-orange-400 animate-pulse font-bold mt-1">
+                        ⌚ Aguarde... enviando componentes biomecânicos e código-fonte...
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                {/* Banner states inside Right Column if appropriate */}
+                <div className="shrink-0">
+                  {githubSyncStatus === 'success' && (
+                    <div className="bg-emerald-950/40 p-3.5 rounded-lg border border-emerald-500/25 space-y-2 text-center animate-fade-in animate-pulse">
+                      <h5 className="text-emerald-400 font-extrabold text-xs font-mono uppercase tracking-wider flex items-center justify-center gap-1">
+                        ✓ Sucesso Total! 🚀
+                      </h5>
+                      <p className="text-[10px] text-emerald-300/85">
+                        Todos os arquivos foram completamente sincronizados e publicados com sucesso.
+                      </p>
+                      <a 
+                        href={githubRepoUrl} 
+                        target="_blank" 
+                        rel="noreferrer"
+                        className="inline-block w-full bg-emerald-500 hover:bg-emerald-400 text-black font-extrabold font-mono text-[10px] py-1.5 rounded uppercase tracking-wider transition-colors mt-1"
+                      >
+                        Visitar Repositório ↗
+                      </a>
+                    </div>
+                  )}
+
+                  {githubSyncStatus === 'error' && (
+                    <div className="bg-red-950/40 p-3.5 rounded-lg border border-red-500/25 space-y-2 text-center">
+                      <h5 className="text-red-400 font-extrabold text-xs font-mono uppercase tracking-wider flex items-center justify-center gap-1">
+                        ✕ Sincronização Falhou
+                      </h5>
+                      <p className="text-[10px] text-red-300/85">
+                        Código de erro do GitHub REST ou falha de autorização do Token PAT fornecido.
+                      </p>
+                      <span className="text-[9px] block text-[#e2bfb0]/55 font-mono">
+                        Consulte o Console Output Log acima para depurar. Veja se o token tem escopo completo para criar/editar repositórios.
+                      </span>
+                    </div>
+                  )}
+
+                  {githubSyncStatus === 'idle' && (
+                    <div className="bg-[#1c1b1b] p-3 text-center border border-[#5a4136]/15 rounded-lg">
+                      <p className="text-[10px] text-[#e2bfb0]/50 font-mono">
+                        Console ocioso. Preencha as credenciais ao lado para iniciar a publicação segura da aplicação no seu GitHub.
+                      </p>
+                    </div>
+                  )}
+                </div>
               </div>
             </div>
           )}
