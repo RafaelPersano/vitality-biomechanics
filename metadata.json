@@ -1,0 +1,6 @@
+{
+  "name": "15-Minute Workout for 40+",
+  "description": "A clean, mobile-first interface to select longevity-focused fitness goals and instantly generate safe, high-intensity 15-minute workouts adapted for people over 40.",
+  "requestFramePermissions": ["camera", "microphone"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

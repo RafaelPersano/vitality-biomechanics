@@ -1,0 +1,99 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    
+    // Default Deny Catch-All
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Global authorization primitives
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function isAdmin() {
+      return isSignedIn() && (
+        exists(/databases/$(database)/documents/admins/$(request.auth.uid)) ||
+        (request.auth.token.keys().hasAll(['email']) && request.auth.token.email == 'corretorpersano@gmail.com')
+      );
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    // Entity static validation schemas
+    function isValidUser(data) {
+      return data.name is string && data.name.size() <= 200
+        && data.gender is string && (data.gender == 'homem' || data.gender == 'mulher' || data.gender == 'outro')
+        && data.age is int
+        && data.selectedGoals is list
+        && data.restrictions is list
+        && data.workoutsCompleted is int
+        && data.streakDays is int
+        && data.hydrationMl is int
+        && data.targetHydrationMl is int
+        && (data.weightKg is int || data.weightKg is float)
+        && (data.muscleMassPercent is int || data.muscleMassPercent is float)
+        && (data.biologicalAge is int || data.biologicalAge is float)
+        && data.hrvBaseline is int;
+    }
+
+    // Resource paths mapping definitions
+    match /users/{userId} {
+      allow get: if isOwner(userId) || isAdmin();
+      allow list: if isAdmin(); // Only administrators can perform generic collection queries
+      allow create: if isOwner(userId) && isValidUser(incoming());
+      allow update: if isOwner(userId) && isValidUser(incoming()) && (
+        incoming().diff(existing()).affectedKeys().hasOnly([
+          'name', 'gender', 'age', 'selectedGoals', 'restrictions', 
+          'preferredDuration', 'selectedEquipment', 'workoutsCompleted', 
+          'streakDays', 'hydrationMl', 'targetHydrationMl', 'weightKg', 
+          'muscleMassPercent', 'biologicalAge', 'hrvBaseline', 'email', 'role',
+          'customExercises'
+        ])
+      );
+      allow delete: if isOwner(userId) || isAdmin();
+    }
+
+    match /admins/{adminId} {
+      allow read: if isSignedIn();
+      allow write: if isAdmin();
+    }
+
+    match /challenges/{challengeId} {
+      allow read: if isSignedIn();
+      allow write: if isAdmin();
+    }
+
+    match /global_exercises/{exerciseId} {
+      allow read: if isSignedIn();
+      allow write: if isAdmin();
+    }
+
+    match /sequences/{sequenceId} {
+      allow read: if isSignedIn();
+      allow write: if isAdmin();
+    }
+
+    match /recordings/{recordingId} {
+      allow read: if isSignedIn() && (resource.data.userId == request.auth.uid || isAdmin());
+      allow create: if isSignedIn() && request.resource.data.userId == request.auth.uid;
+      allow update: if isSignedIn() && (resource.data.userId == request.auth.uid || isAdmin());
+      allow delete: if isAdmin();
+    }
+  }
+}
